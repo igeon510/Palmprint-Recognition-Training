@@ -120,27 +120,20 @@ def test(model):
 
     print('Start EER for Test-Test Set! \n')
 
-    # verification EER of the test set
-    s = []  # matching score
-    l = []  # intra-class or inter-class matching
+    # verification EER of the test set (vectorized)
     ntest = featDB_test.shape[0]
     ntrain = featDB_train.shape[0]
 
-    for i in range(ntest):
-        feat1 = featDB_test[i]
+    # cosine similarity matrix: (ntest, ntrain)
+    cos_mat = np.dot(featDB_test, featDB_train.T)
+    dis_mat = np.arccos(np.clip(cos_mat, -1, 1)) / np.pi
 
-        for j in range(ntrain):
-            feat2 = featDB_train[j]
+    # label matrix: 1 if same identity, -1 otherwise
+    label_mat = (iddb_test[:, None] == iddb_train[None, :]).astype(np.int8)
+    label_mat = np.where(label_mat == 1, 1, -1)
 
-            cosdis = np.dot(feat1, feat2)
-            dis = np.arccos(np.clip(cosdis, -1, 1)) / np.pi
-
-            s.append(dis)
-
-            if iddb_test[i] == iddb_train[j]:  # same palm
-                l.append(1)
-            else:
-                l.append(-1)
+    s = dis_mat.flatten().tolist()
+    l = label_mat.flatten().tolist()
 
     if not os.path.exists(path_rst+'veriEER'):
         os.makedirs(path_rst+'veriEER')
@@ -342,10 +335,8 @@ if __name__== "__main__" :
     des_path = args.des_path
     path_rst = args.path_rst
 
-    if not os.path.exists(des_path):
-        os.makedirs(des_path)
-    if not os.path.exists(path_rst):
-        os.makedirs(path_rst)
+    os.makedirs(des_path, exist_ok=True)
+    os.makedirs(path_rst, exist_ok=True)
 
     # path
     train_set_file = args.train_set_file

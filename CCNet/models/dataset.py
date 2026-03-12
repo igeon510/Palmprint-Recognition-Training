@@ -84,22 +84,21 @@ class MyDataset(data.Dataset):
                     
                     ]) 
             else:
-                self.transforms = T.Compose([  
-                                
+                self.transforms = T.Compose([
+
                     T.Resize(self.imside),
-                    T.RandomChoice(transforms=[
-                        T.ColorJitter(brightness=0, contrast=0.05, saturation=0, hue=0),# 0.3 0.35
-                        T.RandomResizedCrop(size=self.imside, scale=(0.8,1.0), ratio=(1.0, 1.0)),
-                        T.RandomPerspective(distortion_scale=0.15, p=1),# (0.1, 0.2) (0.05, 0.05)
-                        T.RandomChoice(transforms=[
-                            T.RandomRotation(degrees=10, interpolation=T.InterpolationMode.BICUBIC, expand=False, center=(0.5*self.imside, 0.0)),
-                            T.RandomRotation(degrees=10, interpolation=T.InterpolationMode.BICUBIC, expand=False, center=(0.0, 0.5*self.imside)),
-                        ]),
-                    ]),     
+                    # brightness/contrast: handles real-world lighting variation
+                    T.RandomApply([T.ColorJitter(brightness=0.3, contrast=0.3)], p=0.5),
+                    # blur: simulates low camera quality or slight defocus
+                    T.RandomApply([T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5))], p=0.3),
+                    # crop: simulates slight ROI misalignment
+                    T.RandomApply([T.RandomResizedCrop(size=self.imside, scale=(0.85, 1.0), ratio=(1.0, 1.0))], p=0.5),
+                    # small rotation: ROI correction isn't perfect
+                    T.RandomRotation(degrees=5, interpolation=T.InterpolationMode.BICUBIC, expand=False),
 
                     T.ToTensor(),
-                    NormSingleROI(outchannels=self.chs)                   
-                    ])
+                    NormSingleROI(outchannels=self.chs)
+                ])
 
         self._read_txt_file()
 

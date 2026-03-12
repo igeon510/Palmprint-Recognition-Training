@@ -2,4 +2,13 @@ Dataset
 Real
 ROI_output
 ccnet_paper.md
-정리.md 
+정리.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Training outputs (generated on cloud)
+CCNet/results/

@@ -1,6 +1,7 @@
 import os
 # os.environ["KMP_DUPLICATE_LIB_OK"]= "TRUE"
 import argparse
+import json
 import time
 import sys
 
@@ -13,7 +14,6 @@ plt.switch_backend('agg')
 
 from torch.optim import lr_scheduler
 # import pickle
-import cv2 as cv
 from loss import SupConLoss
 from models import MyDataset
 from models.ccnet import ccnet
@@ -25,201 +25,91 @@ import copy
 device = torch.device('cpu')
 
 
-def test(model):
-
-    print('Start Testing!')
+def test(model, openset_file):
+    """Compute EER on open-set persons (unseen during training).
+    Uses self-matching within open-set. Returns EER (%).
+    Saves threshold info to JSON for deployment.
+    """
+    print('--- EER Evaluation (open-set) ---')
     print('%s' % (time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())))
 
-    path_hard = os.path.join(path_rst, 'rank1_hard')
+    os.makedirs(path_rst + 'veriEER', exist_ok=True)
 
-    # train_set_file = './data/train_IITD.txt'
-    # test_set_file = './data/test_IITD.txt'
-
-    trainset = MyDataset(txt=train_set_file, transforms=None, train=False)
-    testset = MyDataset(txt=test_set_file, transforms=None, train=False)
-
-    batch_size = 512  # 128
-
-    data_loader_train = DataLoader(dataset=trainset, batch_size=batch_size, num_workers=2)
-    data_loader_test = DataLoader(dataset=testset, batch_size=batch_size, num_workers=2)
-
-    fileDB_train = getFileNames(train_set_file)
-    fileDB_test = getFileNames(test_set_file)
-
-    # output dir
-    if not os.path.exists(path_rst):
-        os.makedirs(path_rst)
-
-    if not os.path.exists(path_hard):
-        os.makedirs(path_hard)
+    testset = MyDataset(txt=openset_file, transforms=None, train=False)
+    loader = DataLoader(dataset=testset, batch_size=512, num_workers=2)
 
     net = model
     net.to(device)
     net.eval()
 
-    # feature extraction:
-    featDB_train = []
-    iddb_train = []
-
-    for batch_id, (datas, target) in enumerate(data_loader_train):
-
-        data = datas[0].to(device)
-        target = target.to(device)
-
-        codes = net.getFeatureCode(data)
-        codes = codes.cpu().detach().numpy()
-        y = target.cpu().detach().numpy()
-
+    featDB, iddb = [], []
+    for batch_id, (datas, target) in enumerate(loader):
+        codes = net.getFeatureCode(datas[0].to(device)).cpu().detach().numpy()
+        y = target.numpy()
         if batch_id == 0:
-            featDB_train = codes
-            iddb_train = y
+            featDB = codes
+            iddb = y
         else:
-            featDB_train = np.concatenate((featDB_train, codes), axis=0)
-            iddb_train = np.concatenate((iddb_train, y))
+            featDB = np.concatenate((featDB, codes), axis=0)
+            iddb = np.concatenate((iddb, y))
 
-    print('completed feature extraction for training set.')
-    print('featDB_train.shape: ', featDB_train.shape)
+    n = featDB.shape[0]
+    n_persons = len(set(iddb.tolist()))
+    print(f'  open-set: {n_persons} persons, {n} images')
 
-    classNumel = len(set(iddb_train))
-    num_training_samples = featDB_train.shape[0]
-
-    trainNum = num_training_samples // classNumel
-    print('[classNumel, imgs/class]: ', classNumel, trainNum)
-    print('\n')
-
-    featDB_test = []
-    iddb_test = []
-
-    print('Start Test Feature Extraction.')
-    for batch_id, (datas, target) in enumerate(data_loader_test):
-
-        data = datas[0].to(device)
-        target = target.to(device)
-
-        codes = net.getFeatureCode(data)
-
-        codes = codes.cpu().detach().numpy()
-        y = target.cpu().detach().numpy()
-
-        if batch_id == 0:
-            featDB_test = codes
-            iddb_test = y
-        else:
-            featDB_test = np.concatenate((featDB_test, codes), axis=0)
-            iddb_test = np.concatenate((iddb_test, y))
-
-
-    print('completed feature extraction.')
-    print('featDB_test.shape: ', featDB_test.shape)
-
-    print('\nFeature Extraction Done!')
-
-    print('start feature matching ...\n')
-
-    print('Verification EER of the test-test set ...')
-
-    print('Start EER for Test-Test Set! \n')
-
-    # verification EER of the test set (vectorized)
-    ntest = featDB_test.shape[0]
-    ntrain = featDB_train.shape[0]
-
-    # cosine similarity matrix: (ntest, ntrain)
-    cos_mat = np.dot(featDB_test, featDB_train.T)
+    # intra/inter class distance stats
+    cos_mat = np.dot(featDB, featDB.T)
     dis_mat = np.arccos(np.clip(cos_mat, -1, 1)) / np.pi
+    same_mask = (iddb[:, None] == iddb[None, :])
+    np.fill_diagonal(same_mask, False)
+    diff_mask = ~same_mask
+    np.fill_diagonal(diff_mask, False)
+    intra = dis_mat[same_mask]
+    inter = dis_mat[diff_mask]
+    print('  inner (min, max, mean, std): [%f, %f, %f, %f]' % (intra.min(), intra.max(), intra.mean(), intra.std()))
+    print('  outer (min, max, mean, std): [%f, %f, %f, %f]' % (inter.min(), inter.max(), inter.mean(), inter.std()))
 
-    # label matrix: 1 if same identity, -1 otherwise
-    label_mat = (iddb_test[:, None] == iddb_train[None, :]).astype(np.int8)
-    label_mat = np.where(label_mat == 1, 1, -1)
+    # all-pairs scores (upper triangle only, no diagonal)
+    iu = np.triu_indices(n, k=1)
+    s = dis_mat[iu].tolist()
+    same_upper = same_mask[iu]
+    l = np.where(same_upper, 1, -1).tolist()
 
-    s = dis_mat.flatten().tolist()
-    l = label_mat.flatten().tolist()
-
-    if not os.path.exists(path_rst+'veriEER'):
-        os.makedirs(path_rst+'veriEER')
-    if not os.path.exists(path_rst+'veriEER/rank1_hard/'):
-        os.makedirs(path_rst+'veriEER/rank1_hard/')
-
-    with open(path_rst+'veriEER/scores_VeriEER.txt', 'w') as f:
-        for i in range(len(s)):
-            score = str(s[i])
-            label = str(l[i])
-            f.write(score + ' ' + label + '\n')
-
-    sys.stdout.flush()
-    os.system('python ./getGI.py' + '  ' + path_rst + 'veriEER/scores_VeriEER.txt scores_VeriEER')
-    os.system('python ./getEER.py' + '  ' + path_rst + 'veriEER/scores_VeriEER.txt scores_VeriEER')
-
-    print('\n------------------')
-    print('Rank-1 acc of the test set...')
-    # rank-1 acc
-    cnt = 0
-    corr = 0
-    for i in range(ntest):
-        probeID = iddb_test[i]
-
-        dis = np.zeros((ntrain, 1))
-
-        for j in range(ntrain):
-            dis[j] = s[cnt]
-            cnt += 1
-
-        idx = np.argmin(dis[:])
-
-        galleryID = iddb_train[idx]
-
-        if probeID == galleryID:
-            corr += 1
-        else:
-            testname = fileDB_test[i]
-            trainname = fileDB_train[idx]
-            # store similar inter-class samples
-            im_test = cv.imread(testname)
-            im_train = cv.imread(trainname)
-            img = np.concatenate((im_test, im_train), axis=1)
-            cv.imwrite(path_rst + 'veriEER/rank1_hard/%6.4f_%s_%s.png' % (
-                np.min(dis[:]), testname[-13:-4], trainname[-13:-4]), img)
-
-    rankacc = corr / ntest * 100
-    print('rank-1 acc: %.3f%%' % rankacc)
-    print('-----------')
-
-    with open(path_rst + 'veriEER/rank1.txt', 'w') as f:
-        f.write('rank-1 acc: %.3f%%' % rankacc)
-
-    print('\n\nReal EER of the test set...')
-    # dataset EER of the test set (the gallery set is not used)
-    s = []  # matching score
-    l = []  # genuine / impostor matching
-    n = featDB_test.shape[0]
-    for i in range(n - 1):
-        feat1 = featDB_test[i]
-
-        for jj in range(n - i - 1):
-            j = i + jj + 1
-            feat2 = featDB_test[j]
-
-            cosdis = np.dot(feat1, feat2)
-            dis = np.arccos(np.clip(cosdis, -1, 1)) / np.pi
-
-            s.append(dis)
-
-            if iddb_test[i] == iddb_test[j]:
-                l.append(1)
-            else:
-                l.append(-1)
-
-    print('feature extraction about real EER done!\n')
-
-    with open(path_rst + 'veriEER/scores_EER_test.txt', 'w') as f:
-        for i in range(len(s)):
-            score = str(s[i])
-            label = str(l[i])
-            f.write(score + ' ' + label + '\n')
+    scores_path = path_rst + 'veriEER/scores_EER_openset.txt'
+    with open(scores_path, 'w') as f:
+        for score, label in zip(s, l):
+            f.write(f'{score} {label}\n')
 
     sys.stdout.flush()
-    os.system('python ./getGI.py' + '  ' + path_rst + 'veriEER/scores_EER_test.txt scores_EER_test')
-    os.system('python ./getEER.py' + '  ' + path_rst + 'veriEER/scores_EER_test.txt scores_EER_test')
+    os.system('python ./getGI.py' + '  ' + scores_path + ' scores_EER_openset')
+    os.system('python ./getEER.py' + '  ' + scores_path + ' scores_EER_openset')
+
+    # Read EER result and save threshold JSON
+    eer_result_file = path_rst + 'veriEER/scores_EER_openset/rst_eer_th_auc.txt'
+    eer_val = float('inf')
+    if os.path.exists(eer_result_file):
+        with open(eer_result_file) as f:
+            parts = f.readline().split()
+        eer_val   = float(parts[0])
+        thresh_val = float(parts[1])
+        auc_val    = float(parts[2])
+
+        threshold_info = {
+            "eer_percent":      round(eer_val, 6),
+            "threshold_at_eer": round(thresh_val, 6),
+            "auc":              round(auc_val, 8),
+            "n_train_persons":  num_classes,
+            "n_test_persons":   n_persons,
+            "n_test_images":    n,
+        }
+        json_path = des_path + 'threshold_info.json'
+        with open(json_path, 'w') as f:
+            json.dump(threshold_info, f, indent=2)
+        print(f'  EER: {eer_val:.4f}%  threshold: {thresh_val:.4f}  → saved {json_path}')
+    else:
+        print('  [WARN] EER result file not found.')
+
+    return eer_val
 
 # perform one epoch
 def fit(epoch, model, data_loader, phase='training'):
@@ -304,6 +194,8 @@ if __name__== "__main__" :
     ##Training Path
     parser.add_argument("--train_set_file", type=str, default='./data/train_ours.txt')
     parser.add_argument("--test_set_file", type=str, default='./data/test_probe.txt')
+    parser.add_argument("--openset_file", type=str, default='./data/test_openset.txt',
+                        help="Open-set persons (unseen during training) for EER evaluation")
 
     ##Store Path
     parser.add_argument("--des_path", type=str, default='./results/checkpoint/')
@@ -340,14 +232,12 @@ if __name__== "__main__" :
 
     # path
     train_set_file = args.train_set_file
-    test_set_file = args.test_set_file
+    openset_file = args.openset_file
 
     # dataset
     trainset = MyDataset(txt=train_set_file, transforms=None, train=True, imside=128, outchannels=1)
-    testset = MyDataset(txt=test_set_file, transforms=None, train=False, imside=128, outchannels=1)
 
     data_loader_train = DataLoader(dataset=trainset, batch_size=batch_size, num_workers=2, shuffle=True)
-    data_loader_test = DataLoader(dataset=testset, batch_size=128, num_workers=2, shuffle=True)
 
     print('%s' % (time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())))
 
@@ -364,48 +254,41 @@ if __name__== "__main__" :
     scheduler = lr_scheduler.StepLR(optimizer, step_size=args.redstep, gamma=0.8)
 
     train_losses, train_accuracy = [], []
-    val_losses, val_accuracy = [], []
-    bestacc = 0
+    best_eer = float('inf')
 
     for epoch in range(epoch_num):
 
         epoch_loss, epoch_accuracy = fit(epoch, net, data_loader_train, phase='training')
-
-        # ── validation on test set (not train set) ──
-        val_epoch_loss, val_epoch_accuracy = fit(epoch, net, data_loader_test, phase='testing')
 
         scheduler.step()
 
         # ── logs ──
         train_losses.append(epoch_loss)
         train_accuracy.append(epoch_accuracy)
-        val_losses.append(val_epoch_loss)
-        val_accuracy.append(val_epoch_accuracy)
 
-        # save best model based on validation accuracy
-        if val_epoch_accuracy >= bestacc:
-            bestacc = val_epoch_accuracy
-            torch.save(net.state_dict(), des_path + 'net_params_best.pth')
-            best_net = copy.deepcopy(net)
-
-        # save current model and loss/acc curves every 10 epochs
+        # save current model and loss curve every 10 epochs
         if epoch % 10 == 0 or epoch == (epoch_num - 1):
             torch.save(net.state_dict(), des_path + 'net_params.pth')
-            saveLossACC(train_losses, val_losses, train_accuracy, val_accuracy, bestacc, path_rst)
+            saveLossACC(train_losses, [], train_accuracy, [], best_eer, path_rst)
 
         # periodic checkpoint (keeps every N epochs)
         if epoch % args.save_interval == 0 and epoch != 0:
             torch.save(net.state_dict(), des_path + 'epoch_' + str(epoch) + '_net_params.pth')
 
-        # periodic EER evaluation
+        # periodic EER evaluation — best model saved by EER (lower is better)
         if epoch % args.test_interval == 0 and epoch != 0:
             print('------------')
-            test(net)
+            eer = test(net, openset_file)
+            if eer < best_eer:
+                best_eer = eer
+                torch.save(net.state_dict(), des_path + 'net_params_best.pth')
+                best_net = copy.deepcopy(net)
+                print(f'  → new best EER: {best_eer:.4f}%  model saved.')
 
     print('------------')
     print('Last')
-    test(net)
+    test(net, openset_file)
 
     print('------------')
     print('Best')
-    test(best_net)
+    test(best_net, openset_file)

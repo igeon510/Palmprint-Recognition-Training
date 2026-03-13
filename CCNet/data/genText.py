@@ -55,6 +55,7 @@ def main():
                 test_gallery_lines.append(f"{p} {label}")
             for fname in person["session2"]:
                 p = s2_dir / (Path(fname).stem + ".png")
+                train_lines.append(f"{p} {label}")
                 test_probe_lines.append(f"{p} {label}")
         else:
             for fname in person["session2"]:

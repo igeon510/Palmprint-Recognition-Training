@@ -19,7 +19,6 @@ from models import MyDataset
 from models.ccnet import ccnet
 from utils import *
 
-import copy
 
 # Global device — set in __main__ after parsing args
 device = torch.device('cpu')
@@ -243,7 +242,6 @@ if __name__== "__main__" :
 
     print('------Init Model------')
     net = ccnet(num_classes=num_classes,weight=comp_weight)
-    best_net = ccnet(num_classes=num_classes,weight=comp_weight)
     net.to(device)
 
     #
@@ -282,7 +280,6 @@ if __name__== "__main__" :
             if eer < best_eer:
                 best_eer = eer
                 torch.save(net.state_dict(), des_path + 'net_params_best.pth')
-                best_net = copy.deepcopy(net)
                 print(f'  → new best EER: {best_eer:.4f}%  model saved.')
 
     print('------------')
@@ -291,4 +288,7 @@ if __name__== "__main__" :
 
     print('------------')
     print('Best')
+    best_net = ccnet(num_classes=num_classes, weight=comp_weight)
+    best_net.load_state_dict(torch.load(des_path + 'net_params_best.pth', map_location='cpu'))
+    best_net.to(device)
     test(best_net, openset_file)

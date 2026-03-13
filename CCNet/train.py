@@ -200,6 +200,9 @@ if __name__== "__main__" :
     parser.add_argument("--des_path", type=str, default='./results/checkpoint/')
     parser.add_argument("--path_rst", type=str, default='./results/rst_test/')
 
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint to resume from (e.g. results/checkpoint/net_params_best.pth)")
+
     args = parser.parse_args()
 
     # device setup
@@ -242,6 +245,10 @@ if __name__== "__main__" :
 
     print('------Init Model------')
     net = ccnet(num_classes=num_classes,weight=comp_weight)
+    if args.resume:
+        state = torch.load(args.resume, map_location='cpu')
+        net.load_state_dict(state)
+        print(f'Resumed from: {args.resume}')
     net.to(device)
 
     #
